@@ -40,7 +40,6 @@ def create_look_ahead_mask(size):
     mask = 1 - tf.linalg.band_part(tf.ones((size, size)), -1, 0)
     return mask  # (seq_len, seq_len)
 
-
 def create_target_masks(tar):
     # Used in the 1st attention block in the decoder.
     # It is used to pad and mask future tokens in the input received by

@@ -1,9 +1,118 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 import argparse
 import datetime
 import json
 import os
 import time
 import tqdm
+
+
+import os
+
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+
+from tokenizers.implementations import ByteLevelBPETokenizer
+
+
+def parse_function(filename, text):
+    # Read entire contents of image
+    image_string = tf.io.read_file(filename)
+
+    # Don't use tf.image.decode_image, or the output shape will be undefined
+    image = tf.io.decode_jpeg(image_string, channels=3)
+
+    # This will convert to float values in [0, 1]
+    image = tf.image.convert_image_dtype(image, tf.float32)
+
+    # Resize image with padding to 244x244
+    image = tf.image.resize_with_pad(image, 224, 224, method=tf.image.ResizeMethod.BILINEAR)
+
+    return image, text
+
+
+def augmentation_fn(image, text):
+    # Random left-right flip the image
+    image = tf.image.random_flip_left_right(image)
+
+    # Random brightness, saturation and contrast shifting
+    image = tf.image.random_brightness(image, max_delta=32.0 / 255.0)
+    image = tf.image.random_saturation(image, lower=0.5, upper=1.5)
+    image = tf.image.random_contrast(image, lower=0.5, upper=1.5)
+
+    # Make sure the image is still in [0, 1]
+    image = tf.clip_by_value(image, 0.0, 1.0)
+
+    return image, text
+
+
+def make_grayscale_fn(image, text):
+    # Convert image to grayscale
+    image = tf.image.rgb_to_grayscale(image)
+
+    return image, text
+
+
+def get_iu_xray_dataset(csv_root,
+                      vocab_root,
+                      mimic_root,
+                      max_length=128,
+                      batch_size=16,
+                      n_threads=16,
+                      buffer_size=10000,
+                      mode='train',
+                      unsure=1):
+
+    assert mode in ['train', 'validate', 'test']
+    assert unsure in [0, 1]
+
+    # vocab = f.read()vocab, merges = BPE.read_file('../preprocessing/iu-xray/mimic-vocab.json', '../preprocessing/iu-xray/mimic-merges.txt')
+
+
+    # tokenizer = ByteLevelBPETokenizer(
+    #     os.path.join(vocab_root, 'mimic-vocab.json'),
+    #     os.path.join(vocab_root, 'mimic-merges.txt'),
+    # )
+
+    tokenizer = ByteLevelBPETokenizer(
+        'preprocessing/iu-xray/iu-xray-vocab.json',
+        'preprocessing/iu-xray/iu-xray-merges.txt'
+    )
+
+    # Read MIMIC_AP_PA_{mode}.csv file and set unsure values (-1) to 0 or 1
+    csv_file        = os.path.join(csv_root, f'iu_xray_{mode}.csv')
+    replacements    = {float('nan'): '0', -1.0: unsure}
+    reports         = pd.read_csv(csv_file).replace(replacements).values
+
+    image_paths     = [os.path.join(mimic_root, path) for path in reports[:, 1]]
+    texts           = reports[:, -1]
+    # labels          = np.uint8(reports[:, 2:])
+
+    # Tokenize reports
+    texts_tokenized = tokenizer.encode_batch(list(texts))
+    texts_tokenized = [[tokenizer.token_to_id('<s>')] +
+                             seq.ids +
+                             [tokenizer.token_to_id('</s>')]
+                             for seq in texts_tokenized]
+    texts_tokenized = tf.keras.preprocessing.sequence.pad_sequences(
+        texts_tokenized, maxlen=max_length, dtype='int32', padding='post', truncating='post')
+
+    # Create Tensorflow dataset (image, text) pair
+    dataset = tf.data.Dataset.from_tensor_slices((image_paths, texts_tokenized))
+    if mode == 'train':
+        dataset = dataset.shuffle(buffer_size)
+    dataset = dataset.map(parse_function, num_parallel_calls=n_threads)
+    if mode == 'train':
+        dataset = dataset.map(augmentation_fn, num_parallel_calls=n_threads)
+    dataset = dataset.map(make_grayscale_fn, num_parallel_calls=n_threads)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.prefetch(n_threads)
+
+    return dataset, tokenizer
 
 
 def main(args, hparams):
@@ -15,7 +124,7 @@ def main(args, hparams):
     # Load dataset
     BATCH_SIZE_PER_REPLICA = args.batch_size
     GLOBAL_BATCH_SIZE = BATCH_SIZE_PER_REPLICA * strategy.num_replicas_in_sync
-    train_dataset, tokenizer = get_mimic_dataset(args.csv_root, args.vocab_root, args.mimic_root,
+    train_dataset, tokenizer = get_iu_xray_dataset(args.csv_root, args.vocab_root, args.mimic_root,
                                                  batch_size=GLOBAL_BATCH_SIZE)
     train_dist_dataset = strategy.experimental_distribute_dataset(train_dataset)
 
@@ -56,7 +165,8 @@ def main(args, hparams):
                                   target_vocab_size=target_vocab_size,
                                   rate=hparams['dropout_rate'],
                                   input_shape=(hparams['img_x'], hparams['img_y'], hparams['img_ch']),
-                                  classifier_weights=args.classifier_weights)
+                                  # classifier_weights=args.classifier_weights
+                                  )
 
         # Model Checkpointing
         ckpt = tf.train.Checkpoint(transformer=transformer,
@@ -134,13 +244,13 @@ def main(args, hparams):
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--csv_root', default='preprocessing/mimic')
-    parser.add_argument('--vocab_root', default='preprocessing/mimic')
-    parser.add_argument('--mimic_root', default='/data/datasets/chest_xray/MIMIC-CXR/mimic-cxr-jpg-2.0.0.physionet.org')
+    parser.add_argument('--csv_root', default='preprocessing/iu-xray')
+    parser.add_argument('--vocab_root', default='preprocessing/iu-xray')
+    parser.add_argument('--mimic_root', default='IU_XRAY/images')
     parser.add_argument('--model_name', default='train05')
     parser.add_argument('--model_params', default='model/hparams.json')
     parser.add_argument('--classifier_weights', default='classifier/checkpoint/epoch_9.hdf5')
-    parser.add_argument('--n_epochs', default=20)
+    parser.add_argument('--n_epochs', default=1)
     parser.add_argument('--init_lr', default=None)
     parser.add_argument('--batch_size', default=16)
     parser.add_argument('--resume', default=True)
@@ -167,8 +277,8 @@ if __name__ == '__main__':
     # Import Tensorflow AFTER setting environment variables
     # ISSUE: https://github.com/tensorflow/tensorflow/issues/31870
     import tensorflow as tf
-    from datasets.mimic import get_mimic_dataset
     from model.transformer import Transformer, default_hparams
+    # from datasets.iu_xray import get_iu_xray_dataset
     from model.utils import create_target_masks
     from model.lr_scheduler import CustomSchedule
 

@@ -98,7 +98,7 @@ model = tf.keras.Sequential([
     tf.keras.applications.InceptionResNetV2(include_top=False, weights=None, input_shape=(224,224,1)),
     tf.keras.layers.GlobalAveragePooling2D(),
     tf.keras.layers.Dense(1024, activation='relu'),
-    tf.keras.layers.Dense(1)
+    tf.keras.layers.Dense(3)
 ])
 
 model.compile(

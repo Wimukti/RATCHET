@@ -193,6 +193,7 @@ class Encoder(tf.keras.layers.Layer):
 
         # Load pre-trained weights if present
         if pretrain_weights:
+            print(pretrain_weights)
             print(f'{datetime.datetime.now()}: [*] Loading Pretrained DenseNet-121 weights: {pretrain_weights}')
             self.base_model.load_weights(pretrain_weights)
         else:

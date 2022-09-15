@@ -44,6 +44,11 @@ def load_model():
     ckpt = tf.train.Checkpoint(transformer=transformer)
     latest_checkpoint = tf.train.latest_checkpoint(checkpoint_path)
     ckpt.restore(latest_checkpoint)
+
+    # Get accuracy of model
+    loss, accuracy = latest_checkpoint
+
+
     print(f'Model Loaded! Checkpoint file: {latest_checkpoint}')
 
     return transformer, tokenizer
@@ -120,7 +125,7 @@ def evaluate(inp_img, tokenizer, transformer, temperature, top_k, top_p, options
         # concatentate the predicted_id to the output which is given to the decoder
         # as its input.
         output = tf.concat([output, predicted_id], axis=-1)
-
+        full_sentence = tokenizer.decode(tf.squeeze(output, axis=0)[1:])
 
     return tf.squeeze(output, axis=0)[1:], attention_weights, i
 
@@ -165,6 +170,7 @@ if __name__ == '__main__':
         # Check image is CXR
         valid = tf.nn.sigmoid(cxr_validator_model(img_array))
         if valid < 0.1:
+            print("Not a CXR")
             continue
 
         # Generate radiology report
